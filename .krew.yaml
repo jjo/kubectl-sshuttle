@@ -1,0 +1,28 @@
+apiVersion: krew.googlecontainertools.github.com/v1alpha2
+kind: Plugin
+metadata:
+  name: sshuttle
+spec:
+  version: {{ .TagName }}
+  homepage: https://github.com/jjo/kubectl-sshuttle
+  shortDescription: Tunnel traffic through a cluster using sshuttle
+  description: |
+    Manages a proxy pod in a Kubernetes cluster and uses sshuttle to
+    tunnel traffic through it. Lets you reach IPs and subnets that are
+    only accessible from inside the cluster network.
+
+    Requires sshuttle installed locally (pip install sshuttle).
+  platforms:
+  {{- range .Updated.Platforms }}
+  - selector:
+      matchLabels:
+        os: "{{ .Os }}"
+        arch: "{{ .Arch }}"
+    {{addURIAndSha .URI .Sha256 }}
+    bin: kubectl-sshuttle
+    files:
+    - from: LICENSE
+      to: .
+    - from: kubectl-sshuttle
+      to: .
+  {{- end }}
