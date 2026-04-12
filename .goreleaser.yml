@@ -12,7 +12,8 @@ builds:
       - -s -w
 
 archives:
-  - format: tar.gz
+  - formats:
+      - tar.gz
     files:
       - LICENSE
 
