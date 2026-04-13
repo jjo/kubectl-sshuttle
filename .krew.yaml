@@ -13,7 +13,7 @@ spec:
 
     Requires sshuttle installed locally (pip install sshuttle).
   platforms:
-  {{- range .Updated.Platforms }}
+  {{- range .Platforms }}
   - selector:
       matchLabels:
         os: "{{ .Os }}"
