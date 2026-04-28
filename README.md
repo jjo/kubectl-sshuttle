@@ -1,5 +1,7 @@
 # kubectl-sshuttle
 
+NOTE: below demo "video" as taken _from my laptop_, _not_ from inside an exec'd Pod.:
+
 <p align="center">
   <img src="demo/kubectl-sshuttle-cover.webp" alt="kubectl-sshuttle demo" width="800" />
 </p>
