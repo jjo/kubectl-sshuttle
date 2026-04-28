@@ -1,5 +1,9 @@
 # kubectl-sshuttle
 
+<p align="center">
+  <img src="demo/kubectl-sshuttle-cover.webp" alt="kubectl-sshuttle demo" width="800" />
+</p>
+
 A kubectl plugin that tunnels traffic through a Kubernetes cluster using [sshuttle](https://github.com/sshuttle/sshuttle).
 
 It deploys a lightweight proxy pod inside the cluster and uses `sshuttle` to route traffic through it, letting you reach IPs and subnets that are only accessible from within the cluster network.
