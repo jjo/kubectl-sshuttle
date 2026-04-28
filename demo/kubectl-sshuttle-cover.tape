@@ -8,7 +8,7 @@ Output kubectl-sshuttle-cover.mp4
 Set Shell bash
 Set FontSize 18
 Set Width 1280
-Set Height 480
+Set Height 720
 Set Theme "Catppuccin Mocha"
 #Set FontFamily "Fira Mono"
 Set TypingSpeed 35ms
