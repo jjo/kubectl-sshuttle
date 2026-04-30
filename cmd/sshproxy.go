@@ -1,11 +1,16 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -15,6 +20,13 @@ const (
 	envContext   = "KUBECTL_SSHUTTLE_CONTEXT"
 	envNamespace = "KUBECTL_SSHUTTLE_NAMESPACE"
 	envName      = "KUBECTL_SSHUTTLE_NAME"
+
+	// envChunk forces ssh-proxy to fork+pipe into kubectl with chunked stdin
+	// instead of syscall.Exec'ing kubectl directly. Set the value to the
+	// max bytes per chunk (e.g. 768). Use envChunkDelayUS to add an
+	// inter-chunk sleep.
+	envChunk        = "KUBECTL_SSHUTTLE_CHUNK_BYTES"
+	envChunkDelayUS = "KUBECTL_SSHUTTLE_CHUNK_DELAY_US"
 )
 
 var sshProxyCmd = &cobra.Command{
@@ -24,7 +36,7 @@ var sshProxyCmd = &cobra.Command{
 	DisableFlagParsing: true,
 	SilenceUsage:       true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		context := os.Getenv(envContext)
+		ctxName := os.Getenv(envContext)
 		namespace := os.Getenv(envNamespace)
 		name := os.Getenv(envName)
 		if name == "" {
@@ -44,10 +56,83 @@ var sshProxyCmd = &cobra.Command{
 		// Wrap in sh -c to match SSH semantics — sshuttle expects
 		// the transport to run the command through a shell.
 		shellCmd := []string{"sh", "-c", strings.Join(remoteCmd, " ")}
-		execArgs := BuildKubectlExecArgs(context, namespace, name, shellCmd)
-		// syscall.Exec replaces the process — sshuttle needs direct stdio piping.
+		execArgs := BuildKubectlExecArgs(ctxName, namespace, name, shellCmd)
+
+		chunkBytes, _ := strconv.Atoi(os.Getenv(envChunk))
+		if chunkBytes > 0 {
+			delayUs, _ := strconv.Atoi(os.Getenv(envChunkDelayUS))
+			return runKubectlChunked(kubectlPath, execArgs, chunkBytes, time.Duration(delayUs)*time.Microsecond)
+		}
+		// Default: replace process — preserves direct stdio piping +
+		// signal handling that sshuttle expects.
 		return syscall.Exec(kubectlPath, append([]string{"kubectl"}, execArgs...), os.Environ())
 	},
+}
+
+// runKubectlChunked spawns kubectl as a child and proxies stdio with
+// chunking on the path that goes TO kubectl (= sshuttle's stdin).
+// Each chunk is written separately + flushed + slept, so kubectl reads
+// each chunk as its own pipe-read and forwards it as a separate
+// websocket frame. Survives middleware (e.g. tailscale-fronted apiserver
+// proxies) that drop single writes above ~1 KB.
+//
+// Stdout/stderr from kubectl are passed through unchanged (no chunking
+// needed on the read direction — that path is already framed by the
+// ssnet protocol coming from rushtle).
+func runKubectlChunked(kubectlPath string, args []string, chunkBytes int, delay time.Duration) error {
+	if chunkBytes <= 0 {
+		chunkBytes = 768
+	}
+	fmt.Fprintf(os.Stderr, "ssh-proxy: chunking sshuttle stdin into %d-byte writes (delay=%v)\n", chunkBytes, delay)
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, kubectlPath, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("kubectl stdin pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("kubectl start: %w", err)
+	}
+
+	// Pump os.Stdin → kubectl stdin in chunks.
+	go func() {
+		defer stdin.Close()
+		buf := make([]byte, chunkBytes)
+		for {
+			n, rerr := os.Stdin.Read(buf)
+			if n > 0 {
+				if _, werr := stdin.Write(buf[:n]); werr != nil {
+					return
+				}
+				// Flush by sleeping briefly so kubectl drains the
+				// pipe between writes.
+				if delay > 0 {
+					time.Sleep(delay)
+				}
+			}
+			if rerr == io.EOF {
+				return
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}()
+
+	if err := cmd.Wait(); err != nil {
+		// Surface kubectl's exit code for sshuttle's error reporting.
+		if ee, ok := err.(*exec.ExitError); ok {
+			os.Exit(ee.ExitCode())
+		}
+		return err
+	}
+	return nil
 }
 
 // ParseSSHArgs extracts the remote command from sshuttle's SSH invocation args.

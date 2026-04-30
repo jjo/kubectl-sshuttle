@@ -1,0 +1,17 @@
+# Build artifacts
+/kubectl-sshuttle
+/dist/
+/prebuilt/
+rushtle/target/
+
+# IDE / tooling
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Claude / claude-mem session state
+.claude/
+**/.claude/

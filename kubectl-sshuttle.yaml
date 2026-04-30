@@ -3,28 +3,38 @@ kind: Plugin
 metadata:
   name: sshuttle
 spec:
-  version: v0.1.0
+  version: v0.2.0
   homepage: https://github.com/jjo/kubectl-sshuttle
-  shortDescription: Tunnel traffic through a cluster using sshuttle
+  shortDescription: Tunnel traffic through a cluster using sshuttle (or rushtle)
   description: |
-    Manages a proxy pod in a Kubernetes cluster and uses sshuttle to
-    tunnel traffic through it. Lets you reach IPs and subnets that are
-    only accessible from inside the cluster network.
+    Manages a proxy pod in a Kubernetes cluster and tunnels traffic
+    through it. Lets you reach IPs and subnets that are only accessible
+    from inside the cluster network.
 
-    It deploys a lightweight proxy pod, then uses sshuttle with kubectl
-    exec as the transport layer to create a transparent VPN tunnel.
+    Three transport modes:
+      default            sshuttle locally, python+sshuttle in pod
+      --rushtle-server   sshuttle locally, rushtle server in pod
+                         (drop-in replacement for in-pod side)
+      --rushtle          rushtle on both ends, no sshuttle/python at all
+                         (works through tailscale-fronted apiservers
+                          that drop kubectl-exec stdin writes >1KB)
 
-    Requires sshuttle installed locally (pip install sshuttle).
+    The bundled `rushtle` binary (sibling of `kubectl-sshuttle` in the
+    krew install) is used for --rushtle mode. Default and
+    --rushtle-server modes require sshuttle installed locally
+    (pip install sshuttle).
   platforms:
     - selector:
         matchLabels:
           os: linux
           arch: amd64
-      uri: https://github.com/jjo/kubectl-sshuttle/releases/download/v0.1.0/kubectl-sshuttle_Linux_x86_64.tar.gz
+      uri: https://github.com/jjo/kubectl-sshuttle/releases/download/v0.2.0/kubectl-sshuttle_0.2.0_linux_amd64.tar.gz
       sha256: "PLACEHOLDER_LINUX_AMD64"
       bin: kubectl-sshuttle
       files:
         - from: kubectl-sshuttle
+          to: .
+        - from: rushtle
           to: .
         - from: LICENSE
           to: .
@@ -32,11 +42,13 @@ spec:
         matchLabels:
           os: linux
           arch: arm64
-      uri: https://github.com/jjo/kubectl-sshuttle/releases/download/v0.1.0/kubectl-sshuttle_Linux_arm64.tar.gz
+      uri: https://github.com/jjo/kubectl-sshuttle/releases/download/v0.2.0/kubectl-sshuttle_0.2.0_linux_arm64.tar.gz
       sha256: "PLACEHOLDER_LINUX_ARM64"
       bin: kubectl-sshuttle
       files:
         - from: kubectl-sshuttle
+          to: .
+        - from: rushtle
           to: .
         - from: LICENSE
           to: .
@@ -44,11 +56,13 @@ spec:
         matchLabels:
           os: darwin
           arch: amd64
-      uri: https://github.com/jjo/kubectl-sshuttle/releases/download/v0.1.0/kubectl-sshuttle_Darwin_x86_64.tar.gz
+      uri: https://github.com/jjo/kubectl-sshuttle/releases/download/v0.2.0/kubectl-sshuttle_0.2.0_darwin_amd64.tar.gz
       sha256: "PLACEHOLDER_DARWIN_AMD64"
       bin: kubectl-sshuttle
       files:
         - from: kubectl-sshuttle
+          to: .
+        - from: rushtle
           to: .
         - from: LICENSE
           to: .
@@ -56,11 +70,13 @@ spec:
         matchLabels:
           os: darwin
           arch: arm64
-      uri: https://github.com/jjo/kubectl-sshuttle/releases/download/v0.1.0/kubectl-sshuttle_Darwin_arm64.tar.gz
+      uri: https://github.com/jjo/kubectl-sshuttle/releases/download/v0.2.0/kubectl-sshuttle_0.2.0_darwin_arm64.tar.gz
       sha256: "PLACEHOLDER_DARWIN_ARM64"
       bin: kubectl-sshuttle
       files:
         - from: kubectl-sshuttle
+          to: .
+        - from: rushtle
           to: .
         - from: LICENSE
           to: .

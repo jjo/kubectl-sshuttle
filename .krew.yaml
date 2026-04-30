@@ -7,11 +7,21 @@ spec:
   homepage: https://github.com/jjo/kubectl-sshuttle
   shortDescription: Tunnel traffic through a cluster using sshuttle
   description: |
-    Manages a proxy pod in a Kubernetes cluster and uses sshuttle to
-    tunnel traffic through it. Lets you reach IPs and subnets that are
-    only accessible from inside the cluster network.
+    Manages a proxy pod in a Kubernetes cluster and tunnels traffic
+    through it. Lets you reach IPs and subnets that are only accessible
+    from inside the cluster network.
 
-    Requires sshuttle installed locally (pip install sshuttle).
+    Three transport modes:
+      default            — sshuttle locally, python+sshuttle in pod
+      --rushtle-server   — sshuttle locally, rushtle server in pod
+                           (works around kubectl-exec >1KB stdin
+                            truncation seen on tailscale-fronted clusters)
+      --rushtle          — rushtle on both ends, no sshuttle/python at all
+                           (linux+macos, requires root locally for NAT setup)
+
+    Default and --rushtle-server modes require sshuttle locally
+    (pip install sshuttle). The bundled `rushtle` binary is used for
+    --rushtle mode.
   platforms:
   {{- range .Platforms }}
   - selector:
@@ -24,5 +34,7 @@ spec:
     - from: LICENSE
       to: .
     - from: kubectl-sshuttle
+      to: .
+    - from: rushtle
       to: .
   {{- end }}
