@@ -23,12 +23,11 @@ spec:
     (pip install sshuttle). The bundled `rushtle` binary is used for
     --rushtle mode.
   platforms:
-  {{- range .Platforms }}
   - selector:
       matchLabels:
-        os: "{{ .Os }}"
-        arch: "{{ .Arch }}"
-    {{addURIAndSha .URI .Sha256 }}
+        os: linux
+        arch: amd64
+    {{addURIAndSha "https://github.com/jjo/kubectl-sshuttle/releases/download/{{ .TagName }}/kubectl-sshuttle_{{ .TagName }}_linux_amd64.tar.gz" .TagName}}
     bin: kubectl-sshuttle
     files:
     - from: LICENSE
@@ -37,4 +36,42 @@ spec:
       to: .
     - from: rushtle
       to: .
-  {{- end }}
+  - selector:
+      matchLabels:
+        os: linux
+        arch: arm64
+    {{addURIAndSha "https://github.com/jjo/kubectl-sshuttle/releases/download/{{ .TagName }}/kubectl-sshuttle_{{ .TagName }}_linux_arm64.tar.gz" .TagName}}
+    bin: kubectl-sshuttle
+    files:
+    - from: LICENSE
+      to: .
+    - from: kubectl-sshuttle
+      to: .
+    - from: rushtle
+      to: .
+  - selector:
+      matchLabels:
+        os: darwin
+        arch: amd64
+    {{addURIAndSha "https://github.com/jjo/kubectl-sshuttle/releases/download/{{ .TagName }}/kubectl-sshuttle_{{ .TagName }}_darwin_amd64.tar.gz" .TagName}}
+    bin: kubectl-sshuttle
+    files:
+    - from: LICENSE
+      to: .
+    - from: kubectl-sshuttle
+      to: .
+    - from: rushtle
+      to: .
+  - selector:
+      matchLabels:
+        os: darwin
+        arch: arm64
+    {{addURIAndSha "https://github.com/jjo/kubectl-sshuttle/releases/download/{{ .TagName }}/kubectl-sshuttle_{{ .TagName }}_darwin_arm64.tar.gz" .TagName}}
+    bin: kubectl-sshuttle
+    files:
+    - from: LICENSE
+      to: .
+    - from: kubectl-sshuttle
+      to: .
+    - from: rushtle
+      to: .

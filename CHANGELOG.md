@@ -1,5 +1,118 @@
 # Changelog
 
+## v0.2.3 — 2026-05-06
+
+Re-release of v0.2.2 with the krew publish path fixed. The v0.2.2
+release artifacts are present on GitHub Releases but never made it
+into the krew index because the release workflow's krew-release-bot
+step failed on a template error (see below). v0.2.3 ships the same
+binary changes plus the publish fix.
+
+### Fixed
+
+- **`.krew.yaml`**: replaced `{{- range .Platforms }}` with explicit
+  per-platform `addURIAndSha` blocks. krew-release-bot v0.0.50's
+  `ReleaseRequest` does not expose a `.Platforms` field, so the loop
+  failed at template evaluation with `can't evaluate field Platforms
+  in type *source.ReleaseRequest`.
+- **`.goreleaser.yml`**: archive `name_template` now embeds the
+  leading `v` (`kubectl-sshuttle_v{{ .Version }}_{{ .Os }}_{{ .Arch }}`)
+  so the filename matches the URL pattern used by the krew template
+  (`{{ .TagName }}` = `v0.2.3`). Without this, the bot's
+  `addURIAndSha` would 404 trying to fetch the archive.
+
+## v0.2.2 — 2026-05-06
+
+Hardening pass on `--rushtle` mode based on field testing against
+tailscale-fronted apiservers. Adds an automatic link probe so users
+no longer need to know about `--chunk-bytes` for the common cases,
+plus enough debug surface to diagnose the rest.
+
+### Added
+
+- **Link health probe** at `--rushtle` startup. Sends a 16-frame burst
+  of small PINGs immediately after the sync header; if any PONG goes
+  missing within 3 s, automatically enables `RUSHTLE_FRAME_DELAY_US`
+  and retries. Catches the rate-driven coalescing failure mode where
+  back-to-back ssnet frames are merged into a >1 KB websocket message
+  and dropped by middleware.
+- **`--probe-fallback-us` / `RUSHTLE_FRAME_DELAY_US`** runtime knobs.
+  Default 2000 (2 ms inter-frame delay on probe miss). `0` disables
+  the probe entirely. The plugin's `--chunk-delay-us` is plumbed
+  through as the rushtle-side fallback so the same UX flag works in
+  both `--rushtle-server` and `--rushtle` modes.
+- **`--version`** for both `kubectl-sshuttle` and `rushtle`. Output
+  format `<semver>+<git-short-sha>` (e.g. `0.2.2+ab12cd3`). Go side
+  via `-ldflags -X cmd.version=...`; Rust side via `build.rs` running
+  `git rev-parse --short HEAD`. Docker images accept `--build-arg
+  GIT_REV=` since `.dockerignore` excludes `.git/`.
+- **Symmetric `tx`/`rx` debug logging** on both client and server
+  writer tasks. Every framed message is logged once at debug level
+  with channel, command name, and length — single grep to map any
+  symptom to a wire-level cause. See `README.md::Debugging`.
+- **`README.md::Debugging` section**: `RUST_LOG=rushtle=debug` recipe,
+  log-format reference, symptom→cause table, `--probe-fallback-us 0`
+  to disable the probe, manual stale-iptables-chain cleanup recipe.
+- **`AGENTS.md`**: operating notes for AI coding agents (architecture,
+  conventions, the truncation workaround, Docker traps, hard "never
+  do" list, frame-ordering invariants).
+
+### Fixed
+
+- **iptables cleanup `Device or resource busy`**: drain ALL `-D OUTPUT
+  -j chain` jumps in a loop (a stale jump from a prior crash plus the
+  fresh install left two refs; one `-D` cleared one of them, leaving
+  `-X` busy). Retry `-X` once after 100 ms for the nf_tables rule-GC
+  race.
+- **iptables cleanup multi-second hang**: `-w 5` on every iptables
+  call bounds xtables-lock contention with firewalld /
+  NetworkManager. Single-call timing logged at `>500ms` for future
+  diagnosis.
+- **iptables expected-stderr noise**: `iptables_cmd_quiet` swallows
+  the harmless `Bad rule (does a matching rule exist in that chain?)`
+  emitted by the drain-loop terminator and the `Chain already exists`
+  emitted when reusing a chain on `iptables_create_chain`.
+- **iptables `-N` failure handling**: treats existing chain as
+  non-fatal and reuses (sshuttle parity); previously a stale chain
+  from a prior crash would block install forever.
+- **`SIGTERM` left iptables chain stranded**: client signal handler
+  now catches `SIGTERM` in addition to `SIGINT` so `kill <pid>` /
+  systemd-stop runs the cleanup path.
+- **Chunked stdin pump (`cmd/sshproxy.go`) silently swallowed write
+  errors**: now cancels the kubectl-exec context on write/read
+  failure so `cmd.Wait()` unblocks with an exit error sshuttle can
+  see, rather than wedging.
+- **`--rushtle` / `--rushtle-server` mutex** moved to root command's
+  `PersistentPreRunE`. Now applies uniformly to `create` (which
+  previously silently picked one mode and proceeded) and
+  `connect`.
+- **`effectiveName()`** detects explicit `--name` via
+  `Flags().Changed("name")` instead of comparing the value against
+  the default. Passing the literal default value as `--name` no
+  longer flips into the rushtle-suffix branch.
+- **macOS `PfiocNatlook` struct size**: was 76 bytes (with `u16`
+  ports), `DIOCNATLOOK` ioctl writes 96 bytes — kernel UB. Now uses
+  4-byte `pf_state_xport` unions + tail pad to reach 96, with a
+  compile-time `assert!(size_of == 96)`.
+- **macOS pf direction probe**: matches sshuttle's `pf.py` order —
+  `PF_OUT` then fall back to `PF_IN`.
+
+### Changed
+
+- **`rushtle/Dockerfile`** — multiarch via `TARGETARCH` + buildx
+  qemu emulation; no hardcoded `x86_64-unknown-linux-musl` triple.
+  Stub-build-then-real trick removed (Docker mtime normalization
+  caused the stub to be shipped instead of the real binary; same
+  trap that `Dockerfile.builder` was already fixed for).
+- **`Makefile`** — `KREW_TARBALL` uses recursive (`=`) expansion so
+  the `wildcard` is evaluated when the variable is referenced, not
+  at parse time (`dist/` doesn't exist until `release-snapshot`
+  runs). Also adds `--build-arg GIT_REV=$(GIT_REV)` to the docker
+  image targets.
+- **`.goreleaser.yml`** — embeds `{{ .Version }}+{{ .ShortCommit }}`
+  in the build ldflags so released binaries also report a
+  meaningful `--version`.
+
 ## v0.2.0 — 2026-04-30
 
 ### Added

@@ -23,6 +23,12 @@ builds:
 
 archives:
   - id: default
+    # Embed the leading `v` in the archive filename so the
+    # krew-release-bot template (`.TagName` = "v0.2.x") can use a single
+    # `addURIAndSha` URL pattern for both the path component and the
+    # filename. Without this, the path uses `v0.2.x` but the filename
+    # uses `0.2.x`, requiring sprig template tricks to bridge.
+    name_template: "{{ .ProjectName }}_v{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats:
       - tar.gz
     files:
