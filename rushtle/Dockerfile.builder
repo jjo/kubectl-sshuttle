@@ -10,14 +10,15 @@ ARG RUST_VERSION=1.91
 ARG DEBIAN_RELEASE=bookworm
 
 FROM rust:${RUST_VERSION}-slim-${DEBIAN_RELEASE} AS builder
+ARG GIT_REV=unknown
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config build-essential ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 
-COPY Cargo.toml Cargo.lock* ./
+COPY Cargo.toml Cargo.lock* build.rs ./
 COPY src ./src
-RUN cargo build --release && \
+RUN RUSHTLE_GIT_REV_OVERRIDE="${GIT_REV}" cargo build --release && \
     strip target/release/rushtle && \
     cp target/release/rushtle /rushtle
 

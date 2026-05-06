@@ -66,6 +66,12 @@ pub async fn run(compat_bootstrap: bool, assembler_bytes: u64) -> Result<()> {
     let writer_clone = writer.clone();
     let writer_task = tokio::spawn(async move {
         while let Some(frame) = out_rx.recv().await {
+            tracing::debug!(
+                "tx ch={} cmd={} len={}",
+                frame.channel,
+                Frame::cmd_name(frame.cmd),
+                frame.data.len()
+            );
             let mut w = writer_clone.lock().await;
             if let Err(e) = ssnet::write_frame(&mut *w, &frame).await {
                 tracing::error!("stdout write failed: {e}");

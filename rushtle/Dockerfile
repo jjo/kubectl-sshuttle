@@ -23,15 +23,19 @@ ARG ALPINE_VERSION=3.20
 # would require a cross-linker (musl-cross-aarch64) we don't bundle.
 FROM rust:${RUST_VERSION}-alpine${ALPINE_VERSION} AS builder
 ARG TARGETARCH
+# Short git sha for the version string. Defaults to `unknown` so the build
+# still succeeds when invoked without `--build-arg GIT_REV=...`. See
+# build.rs for how the override is consumed.
+ARG GIT_REV=unknown
 RUN apk add --no-cache musl-dev
 WORKDIR /src
 
-COPY Cargo.toml Cargo.lock* ./
+COPY Cargo.toml Cargo.lock* build.rs ./
 COPY src ./src
 # Alpine rust image's default host target is already `<arch>-unknown-linux-musl`,
 # so plain `cargo build --release` produces a static musl binary for whichever
 # arch we're emulating. No --target / rustup-target-add needed.
-RUN cargo build --release && \
+RUN RUSHTLE_GIT_REV_OVERRIDE="${GIT_REV}" cargo build --release && \
     strip /src/target/release/rushtle && \
     cp /src/target/release/rushtle /rushtle
 

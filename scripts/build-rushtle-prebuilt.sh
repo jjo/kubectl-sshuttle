@@ -18,6 +18,13 @@ RUSHTLE_DIR="$ROOT/rushtle"
 DIST="$ROOT/prebuilt"
 mkdir -p "$DIST"
 
+# Short git sha embedded into rushtle's --version output. Computed here
+# rather than via build.rs because the Docker build context excludes
+# `.git/` so build.rs can't introspect the repo on its own.
+GIT_REV="${GIT_REV:-$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)}"
+export GIT_REV
+echo "==> rushtle git rev: $GIT_REV"
+
 build_linux_native_amd64() {
     local out="$DIST/rushtle_linux_amd64"
     mkdir -p "$out"
@@ -25,6 +32,7 @@ build_linux_native_amd64() {
     docker buildx build \
         --platform linux/amd64 \
         --no-cache \
+        --build-arg "GIT_REV=${GIT_REV}" \
         -f "$RUSHTLE_DIR/Dockerfile.builder" \
         --target bin \
         --output "type=local,dest=${out}" \
@@ -43,6 +51,7 @@ build_linux_qemu_arm64() {
     docker buildx build \
         --platform linux/arm64 \
         --no-cache \
+        --build-arg "GIT_REV=${GIT_REV}" \
         -f "$RUSHTLE_DIR/Dockerfile.builder" \
         --target bin \
         --output "type=local,dest=${out}" \

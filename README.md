@@ -171,6 +171,91 @@ kubectl sshuttle --rushtle-server --chunk-bytes 768 connect 10.0.0.0/8 -- --dns
 The remote rushtle server resolves queries via the pod's
 `/etc/resolv.conf` (cluster CoreDNS).
 
+## Debugging
+
+### Verbose logs
+
+`rushtle` honors `RUST_LOG` (standard `tracing-subscriber` filter syntax).
+The plugin propagates the env to the local `rushtle` subprocess via
+`syscall.Exec(... os.Environ())`, so prefix the env on the kubectl-sshuttle
+invocation:
+
+```bash
+RUST_LOG=rushtle=debug sudo -E kubectl sshuttle --context my-cluster \
+    --rushtle connect 10.0.0.0/8 -- --dns
+```
+
+Equivalent: pass `-vv` after `--` (forwarded as a `clap` global flag to
+`rushtle client`):
+
+```bash
+sudo -E kubectl sshuttle --rushtle connect 10.0.0.0/8 -- --dns -vv
+```
+
+`sudo -E` is required to preserve `RUST_LOG` across the privilege change
+(`--rushtle` mode needs root for iptables).
+
+In-pod `rushtle server` runs without verbose flags by default. To get
+its debug logs, edit `cmd/connect.go::kubectlExecRushtleServer` and
+append `"-vv"` to the exec argv, then rebuild.
+
+### Reading the logs
+
+Both sides log every framed message symmetrically — `tx` for outbound,
+`rx` for inbound:
+
+```text
+DEBUG rushtle::client: tx ch=54 cmd=TCP_CONNECT len=20
+INFO  rushtle::server: ch=54 TCP -> 10.48.11.254:80
+DEBUG rushtle::server: tx ch=54 cmd=TCP_DATA len=768
+DEBUG rushtle::client: rx ch=54 cmd=TCP_DATA len=768
+```
+
+| Symptom in logs | Likely cause |
+|---|---|
+| Client `tx ... TCP_DATA`, no server `rx` of it | kubectl-exec layer dropped the frame (apiserver / tailscale truncation) |
+| Server `rx`, server `tx ... TCP_DATA`, no client `rx` | response direction dropped — same class of bug, opposite path |
+| Both sides flowing, then 30 s gap → `unexpected EOF` | apiserver idle-timeout closed the kubectl-exec session (not a frame issue) |
+| `link probe failed ... lost N/16 PONGs` | startup probe detected truncation, FRAME_DELAY auto-fallback engaged |
+
+### Forcing chunking
+
+If the auto-probe doesn't catch your cluster's failure mode, force
+inter-frame delay manually:
+
+```bash
+# Pin a frame delay (microseconds). 2000us = 2ms is a good default.
+RUSHTLE_FRAME_DELAY_US=2000 sudo -E kubectl sshuttle --rushtle connect 10.0.0.0/8
+
+# Or via the plugin's --chunk-bytes flag (also pre-sets FRAME_DELAY):
+sudo -E kubectl sshuttle --rushtle --chunk-bytes 768 --chunk-delay-us 2000 \
+    connect 10.0.0.0/8
+```
+
+To disable the probe entirely (fastest startup, no auto-fallback):
+
+```bash
+sudo -E kubectl sshuttle --rushtle connect 10.0.0.0/8 -- \
+    --probe-fallback-us 0
+```
+
+### Stale iptables chain
+
+If rushtle was killed with `kill -9` (or the host crashed) the NAT chain
+`RUSHTLE_<pid>` may persist. List and remove manually:
+
+```bash
+sudo iptables -t nat -L OUTPUT -n | grep RUSHTLE_
+# pick the chain name, then:
+sudo iptables -t nat -D OUTPUT -j RUSHTLE_<pid>
+sudo iptables -t nat -F RUSHTLE_<pid>
+sudo iptables -t nat -X RUSHTLE_<pid>
+```
+
+A subsequent rushtle start reuses an existing same-pid chain (treats it
+as already-installed), but a different-pid leftover does no harm — it's
+just dead rules.
+
 ## Building
 
 ```bash

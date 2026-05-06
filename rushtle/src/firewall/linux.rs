@@ -94,6 +94,18 @@ pub fn original_dst(sock: &TcpStream, is_v6: bool) -> Result<(String, u16)> {
 }
 
 fn iptables_cmd(bin: &str, args: &[&str]) -> Result<()> {
+    iptables_cmd_inner(bin, args, false)
+}
+
+/// Same as `iptables_cmd` but suppresses stderr from the failing call —
+/// used by drain loops where a non-zero exit is the expected terminator
+/// and iptables's "Bad rule (does a matching rule exist in that chain?)"
+/// message would otherwise spam the user's terminal once per iteration.
+fn iptables_cmd_quiet(bin: &str, args: &[&str]) -> Result<()> {
+    iptables_cmd_inner(bin, args, true)
+}
+
+fn iptables_cmd_inner(bin: &str, args: &[&str], quiet: bool) -> Result<()> {
     // Mirror sshuttle's UX: when not root, prefix `sudo -n` so the user
     // doesn't have to wrap the whole command. Falls back to interactive
     // sudo (`-p '[local sudo] Password: '`) if NOPASSWD isn't configured.
@@ -101,20 +113,34 @@ fn iptables_cmd(bin: &str, args: &[&str]) -> Result<()> {
     let mut cmd = if needs_sudo {
         let mut c = std::process::Command::new("sudo");
         c.arg("-p").arg("[local sudo] Password: ").arg(bin);
+        // -w 5: bound xtables-lock wait to 5 s. Without `-w` some iptables
+        // builds wait indefinitely on lock contention (e.g. firewalld /
+        // NetworkManager poking netfilter), turning a normal cleanup into
+        // a multi-tens-of-seconds stall.
+        c.arg("-w").arg("5");
         for a in args {
             c.arg(a);
         }
         c
     } else {
         let mut c = std::process::Command::new(bin);
+        c.arg("-w").arg("5");
         for a in args {
             c.arg(a);
         }
         c
     };
+    if quiet {
+        cmd.stderr(std::process::Stdio::null());
+    }
+    let started = std::time::Instant::now();
     let status = cmd
         .status()
         .with_context(|| format!("exec {bin} {args:?}"))?;
+    let elapsed = started.elapsed();
+    if elapsed > std::time::Duration::from_millis(500) {
+        tracing::warn!("{bin} {args:?} took {elapsed:?}");
+    }
     if !status.success() {
         return Err(anyhow!("{bin} {args:?} exited with {status}"));
     }
@@ -126,18 +152,18 @@ fn iptables_cmd(bin: &str, args: &[&str]) -> Result<()> {
 /// sshuttle handles this by proceeding straight to `-F` to flush it.
 /// Returns Ok(()) whether the chain was newly created or already existed.
 fn iptables_create_chain(bin: &str, chain: &str) -> Result<()> {
-    let res = iptables_cmd(bin, &["-t", "nat", "-N", chain]);
+    // Use the quiet variant so the expected "Chain already exists" stderr
+    // from a stale-chain reuse doesn't surface to the user.
+    let res = iptables_cmd_quiet(bin, &["-t", "nat", "-N", chain]);
     if res.is_ok() {
         return Ok(());
     }
-    // Probe for existence with `-L` (silent on success). If it exists, the
-    // earlier -N error was the harmless "Chain already exists"; otherwise
-    // surface the original failure.
-    if iptables_cmd(bin, &["-t", "nat", "-L", chain, "-n"]).is_ok() {
+    if iptables_cmd_quiet(bin, &["-t", "nat", "-L", chain, "-n"]).is_ok() {
         tracing::info!("{bin} chain {chain} already exists, reusing");
         return Ok(());
     }
-    res
+    // Re-run loudly to surface the real error to the user.
+    iptables_cmd(bin, &["-t", "nat", "-N", chain])
 }
 
 pub fn install(
@@ -211,13 +237,40 @@ pub fn install(
 
 pub fn remove(chain: &str, has_v6: bool) -> Result<()> {
     tracing::info!("removing iptables chain {chain}");
-    let _ = iptables_cmd("iptables", &["-t", "nat", "-D", "OUTPUT", "-j", chain]);
-    let _ = iptables_cmd("iptables", &["-t", "nat", "-F", chain]);
-    let _ = iptables_cmd("iptables", &["-t", "nat", "-X", chain]);
+    remove_one("iptables", chain);
     if has_v6 {
-        let _ = iptables_cmd("ip6tables", &["-t", "nat", "-D", "OUTPUT", "-j", chain]);
-        let _ = iptables_cmd("ip6tables", &["-t", "nat", "-F", chain]);
-        let _ = iptables_cmd("ip6tables", &["-t", "nat", "-X", chain]);
+        remove_one("ip6tables", chain);
     }
     Ok(())
+}
+
+/// Tear down a chain on a single backend.
+///
+/// Unhooks ALL `-j chain` jumps from `OUTPUT` (a duplicate jump from a prior
+/// install would otherwise leave the chain referenced and `-X` would fail
+/// with "Device or resource busy"). Then flushes the chain and tries to
+/// delete it; on `nf_tables` backends a single delete sometimes races with
+/// kernel GC of just-flushed rules, so we retry once after a brief sleep.
+fn remove_one(bin: &str, chain: &str) {
+    // Drain every `-A OUTPUT -j chain` jump. iptables `-D` removes one
+    // matching rule per call and exits non-zero when none remain — that
+    // non-zero exit is our terminator. Use the quiet variant so the
+    // expected "Bad rule" stderr from the terminating call doesn't
+    // surface to the user.
+    let mut drained = 0;
+    while iptables_cmd_quiet(bin, &["-t", "nat", "-D", "OUTPUT", "-j", chain]).is_ok() {
+        drained += 1;
+        if drained > 16 {
+            tracing::warn!("{bin}: more than 16 jumps to {chain} in OUTPUT — bailing out");
+            break;
+        }
+    }
+    let _ = iptables_cmd_quiet(bin, &["-t", "nat", "-F", chain]);
+    if let Err(e) = iptables_cmd_quiet(bin, &["-t", "nat", "-X", chain]) {
+        tracing::debug!("{bin} -X {chain} first attempt: {e}; retrying after 100ms");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if let Err(e) = iptables_cmd(bin, &["-t", "nat", "-X", chain]) {
+            tracing::warn!("{bin} -X {chain} failed (chain may need manual cleanup): {e}");
+        }
+    }
 }

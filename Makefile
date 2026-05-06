@@ -48,7 +48,7 @@ rushtle:
 # Build rushtle docker image. The Dockerfile builds a static musl binary
 # inside the container so the host doesn't need musl-cross.
 rushtle-image:
-	docker build -t $(RUSHTLE_REF) $(RUSHTLE_DIR)
+	docker build --build-arg GIT_REV=$(GIT_REV) -t $(RUSHTLE_REF) $(RUSHTLE_DIR)
 
 # Push the locally-built single-arch image to its registry.
 rushtle-push: rushtle-image
@@ -72,6 +72,7 @@ images-push: rushtle-push sshuttle-push
 rushtle-image-multiarch:
 	docker buildx build \
 	    --platform linux/amd64,linux/arm64 \
+	    --build-arg GIT_REV=$(GIT_REV) \
 	    -t $(RUSHTLE_REF) \
 	    --push \
 	    $(RUSHTLE_DIR)

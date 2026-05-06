@@ -12,14 +12,24 @@
 use std::process::Command;
 
 fn main() {
-    let rev = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
+    // Allow the caller to inject the value (Docker / CI build with no .git
+    // in the context). Env var wins over `git rev-parse`. Re-run if the
+    // override changes.
+    println!("cargo:rerun-if-env-changed=RUSHTLE_GIT_REV_OVERRIDE");
+
+    let rev = std::env::var("RUSHTLE_GIT_REV_OVERRIDE")
         .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+        .or_else(|| {
+            Command::new("git")
+                .args(["rev-parse", "--short", "HEAD"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or_else(|| "unknown".to_string());
 
     println!("cargo:rustc-env=RUSHTLE_GIT_REV={rev}");

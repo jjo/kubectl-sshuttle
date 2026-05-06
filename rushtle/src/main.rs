@@ -77,6 +77,14 @@ enum Cmd {
         #[arg(long = "latency-control")]
         latency_control: bool,
 
+        /// Microsecond per-frame delay to enable when the startup link
+        /// probe times out. The probe sends a 2 KB PING right after the
+        /// sync header — if the kubectl-exec layer drops it, we set the
+        /// inter-frame delay to this value and retry. 0 disables the
+        /// probe entirely. Default 2000 (2 ms).
+        #[arg(long, default_value_t = 2000)]
+        probe_fallback_us: u64,
+
         /// CIDRs to route through the tunnel.
         #[arg(required = true)]
         subnets: Vec<String>,
@@ -130,6 +138,7 @@ fn main() -> Result<()> {
             0
         };
         init_tracing(verbose);
+        ssnet::init_frame_delay_from_env();
         tracing::info!("rushtle invoked as python shim (-c), assembler_bytes={n}");
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -139,6 +148,7 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     init_tracing(cli.verbose);
+    ssnet::init_frame_delay_from_env();
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -158,6 +168,7 @@ fn main() -> Result<()> {
                 dns_listen_port,
                 no_latency_control,
                 latency_control,
+                probe_fallback_us,
                 subnets,
             } => {
                 if no_latency_control {
@@ -173,6 +184,7 @@ fn main() -> Result<()> {
                     manage_iptables: !no_iptables,
                     dns,
                     dns_listen_port,
+                    probe_fallback_us,
                 })
                 .await
             }

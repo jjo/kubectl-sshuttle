@@ -5,11 +5,12 @@
 
 use crate::firewall;
 use crate::ssnet::{self, Frame};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::collections::HashMap;
 use std::net::{Ipv6Addr, SocketAddr};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::process::Command;
@@ -25,6 +26,13 @@ pub struct ClientArgs {
     pub manage_iptables: bool,
     pub dns: bool,
     pub dns_listen_port: u16,
+
+    /// Microsecond per-frame delay to switch on if the startup link probe
+    /// times out. Default 2000 (2 ms). Set to 0 to skip the probe entirely
+    /// (useful when the user has already pinned `RUSHTLE_FRAME_DELAY_US`
+    /// via env or knows their cluster is healthy and wants minimum
+    /// latency).
+    pub probe_fallback_us: u64,
 }
 
 type ChanMap = Arc<Mutex<HashMap<u16, mpsc::Sender<Vec<u8>>>>>;
@@ -73,13 +81,36 @@ pub async fn run(args: ClientArgs) -> Result<()> {
         .spawn()
         .with_context(|| format!("spawn remote: {}", args.remote_cmd))?;
 
-    let remote_stdin = child.stdin.take().ok_or_else(|| anyhow!("no remote stdin"))?;
+    let mut remote_stdin = child.stdin.take().ok_or_else(|| anyhow!("no remote stdin"))?;
     let remote_stdout = child.stdout.take().ok_or_else(|| anyhow!("no remote stdout"))?;
+    let mut remote_stdout = tokio::io::BufReader::new(remote_stdout);
+
+    if let Err(e) = ssnet::read_sync_header(&mut remote_stdout).await {
+        return Err(anyhow!("waiting for server sync header: {e}"));
+    }
+    tracing::info!("got server sync header, entering ssnet mode");
+
+    // Probe link health before opening real connections. On truncating
+    // middleware (some tailscale-fronted apiservers) the probe times out;
+    // we then turn on chunking and retry. See `ensure_link` for the full
+    // logic. Probe is inline because it consumes the same stdin/stdout
+    // streams that the writer / demux tasks will own afterwards.
+    ensure_link(
+        &mut remote_stdin,
+        &mut remote_stdout,
+        args.probe_fallback_us,
+    )
+    .await?;
 
     let (out_tx, mut out_rx) = mpsc::channel::<Frame>(1024);
-    let mut remote_stdin = remote_stdin;
     let _writer_task = tokio::spawn(async move {
         while let Some(frame) = out_rx.recv().await {
+            tracing::debug!(
+                "tx ch={} cmd={} len={}",
+                frame.channel,
+                Frame::cmd_name(frame.cmd),
+                frame.data.len()
+            );
             if let Err(e) = ssnet::write_frame(&mut remote_stdin, &frame).await {
                 tracing::error!("remote stdin write: {e}");
                 break;
@@ -93,12 +124,6 @@ pub async fn run(args: ClientArgs) -> Result<()> {
     let channels_in = channels.clone();
     let dns_in = dns_inflight.clone();
     let dns_sock_in = dns_sock.clone();
-    let mut remote_stdout = tokio::io::BufReader::new(remote_stdout);
-
-    if let Err(e) = ssnet::read_sync_header(&mut remote_stdout).await {
-        return Err(anyhow!("waiting for server sync header: {e}"));
-    }
-    tracing::info!("got server sync header, entering ssnet mode");
 
     let out_tx_pong = out_tx.clone();
     let _demux_task = tokio::spawn(async move {
@@ -341,6 +366,178 @@ async fn handle_conn(
     let _ = tokio::join!(a, b);
     channels.lock().await.remove(&ch);
     tracing::debug!("ch={ch} closed");
+}
+
+// --- link health probe -----------------------------------------------------
+
+/// Base channel for probe PING/PONG. We allocate `PROBE_BURST_FRAMES`
+/// consecutive channels above the `next_id` allocator's wrapping range
+/// (which keeps to 1..=u16::MAX-1) so probe channels cannot collide with
+/// real connections.
+const PROBE_CHANNEL_BASE: u16 = 0xFF00;
+
+/// Number of frames sent back-to-back during the probe.
+///
+/// The `--rushtle` truncation seen on tailscale-fronted apiservers in
+/// practice is NOT triggered by single-write size (a lone 2 KB PING goes
+/// through fine) — it's triggered by rapid back-to-back writes being
+/// coalesced by the kernel pipe + apiserver buffer into a single 1+ KB
+/// websocket frame which middleware then drops. So the probe must imitate
+/// real traffic: send many small frames in quick succession and verify
+/// all replies come back.
+const PROBE_BURST_FRAMES: usize = 16;
+
+/// Per-frame payload size. 256 bytes keeps each individual frame small
+/// (264 bytes total with the 8-byte header) so any failure points to
+/// rate-driven coalescing rather than per-frame oversize.
+const PROBE_FRAME_PAYLOAD: usize = 256;
+
+/// How long to wait for all PONGs before declaring the probe failed and
+/// turning on chunking.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Verify the kubectl-exec stdio path can carry a burst of small frames
+/// without losing any. On failure, switch on per-frame delay and retry once.
+///
+/// This catches the dominant failure mode in `--rushtle` mode: middleware
+/// coalesces back-to-back ssnet frames into 1+ KB websocket messages and
+/// then truncates them, leaving the tunnel idle until the apiserver gives
+/// up and closes it. With this probe we detect it in the first ~3 s and
+/// surface a clear log line + auto-fallback.
+async fn ensure_link<W, R>(stdin: &mut W, stdout: &mut R, fallback_us: u64) -> Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+    R: AsyncReadExt + Unpin,
+{
+    if fallback_us == 0 {
+        tracing::info!("link probe disabled (--probe-fallback-us=0)");
+        return Ok(());
+    }
+
+    let payloads = make_probe_payloads();
+    tracing::info!(
+        "starting link probe ({} frames × {} byte PINGs, timeout {:?}, fallback {fallback_us}us)",
+        PROBE_BURST_FRAMES,
+        PROBE_FRAME_PAYLOAD,
+        PROBE_TIMEOUT
+    );
+
+    match probe_once(stdin, stdout, &payloads).await {
+        Ok(()) => {
+            tracing::info!(
+                "link probe OK ({} burst PINGs round-tripped, no chunking needed)",
+                PROBE_BURST_FRAMES
+            );
+            Ok(())
+        }
+        Err(e) => {
+            tracing::warn!(
+                "link probe failed ({e}); enabling FRAME_DELAY={fallback_us}us auto-fallback and retrying"
+            );
+            ssnet::set_frame_delay_us(fallback_us);
+            probe_once(stdin, stdout, &payloads).await.with_context(|| {
+                format!(
+                    "link probe still failing with FRAME_DELAY={fallback_us}us — \
+                     apiserver layer drops frames even with chunking. \
+                     Try a larger --probe-fallback-us, or fall back to --rushtle-server."
+                )
+            })?;
+            tracing::info!("link probe OK with FRAME_DELAY={fallback_us}us auto-fallback");
+            Ok(())
+        }
+    }
+}
+
+fn make_probe_payloads() -> Vec<Vec<u8>> {
+    // Distinct deterministic content per frame — lets us detect the case
+    // where one frame's payload is silently delivered to the channel of
+    // another (a coalescing-and-misalign symptom).
+    (0..PROBE_BURST_FRAMES)
+        .map(|i| {
+            (0..PROBE_FRAME_PAYLOAD)
+                .map(|j| (((i * 31) + j) & 0xff) as u8)
+                .collect()
+        })
+        .collect()
+}
+
+/// Fire the burst, then collect PONGs until either all `PROBE_BURST_FRAMES`
+/// are accounted for or the timeout fires.
+///
+/// Server's housekeeping frames (initial `PING(chicken)` on channel 0,
+/// empty `CMD_ROUTES`, etc.) are skipped; only PONGs in the reserved
+/// `PROBE_CHANNEL_BASE` range count.
+async fn probe_once<W, R>(stdin: &mut W, stdout: &mut R, payloads: &[Vec<u8>]) -> Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+    R: AsyncReadExt + Unpin,
+{
+    for (i, payload) in payloads.iter().enumerate() {
+        let ch = PROBE_CHANNEL_BASE + i as u16;
+        let frame = Frame::new(ch, ssnet::CMD_PING, payload.clone());
+        ssnet::write_frame(stdin, &frame)
+            .await
+            .with_context(|| format!("sending probe PING #{i} (ch={ch})"))?;
+    }
+
+    let mut seen = vec![false; payloads.len()];
+    let result = tokio::time::timeout(PROBE_TIMEOUT, async {
+        let mut got = 0usize;
+        while got < payloads.len() {
+            match ssnet::read_frame(stdout).await {
+                Ok(Some(f)) if f.cmd == ssnet::CMD_PONG => {
+                    let idx = f.channel.wrapping_sub(PROBE_CHANNEL_BASE) as usize;
+                    if idx >= payloads.len() {
+                        tracing::debug!(
+                            "probe: skipping unexpected PONG on ch={}",
+                            f.channel
+                        );
+                        continue;
+                    }
+                    if f.data != payloads[idx] {
+                        bail!(
+                            "probe PONG #{idx} payload mismatch ({} bytes received, {} expected)",
+                            f.data.len(),
+                            payloads[idx].len()
+                        );
+                    }
+                    if !seen[idx] {
+                        seen[idx] = true;
+                        got += 1;
+                    }
+                }
+                Ok(Some(f)) => {
+                    tracing::debug!(
+                        "probe: skipping {} on ch={}",
+                        Frame::cmd_name(f.cmd),
+                        f.channel
+                    );
+                }
+                Ok(None) => bail!("EOF on remote stdout during probe"),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(_elapsed) => {
+            let lost: Vec<usize> = seen
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &v)| (!v).then_some(i))
+                .collect();
+            Err(anyhow!(
+                "probe timeout after {PROBE_TIMEOUT:?}, lost {}/{} PONGs (idx {:?})",
+                lost.len(),
+                payloads.len(),
+                lost
+            ))
+        }
+    }
 }
 
 fn split_subnets_by_family(subnets: &[String]) -> (Vec<String>, Vec<String>) {

@@ -36,20 +36,41 @@ pub const MAX_PAYLOAD: usize = u16::MAX as usize;
 /// kubernetes apiservers (see prior debug session).
 pub const CHUNK: usize = 768;
 
-/// Optional inter-frame sleep (microseconds), read once at startup from
-/// `RUSHTLE_FRAME_DELAY_US`. Set to e.g. 2000 (2 ms) on a truncating cluster
-/// so kubectl's stdin pipe drains between frames and each frame goes out
-/// as its own websocket frame. 0 = no delay (default, fastest).
-static FRAME_DELAY: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+/// Inter-frame sleep, microseconds. Mutable at runtime so the link probe in
+/// `client::run` can switch on chunking on the fly (no need to restart
+/// rushtle). Reads are `Relaxed` because the value is advisory — at most
+/// one frame is sent at the wrong delay across a transition, which has no
+/// correctness impact.
+///
+/// 0 = no delay (default, fastest). Set to e.g. 2000 (2 ms) on truncating
+/// clusters so kubectl's stdin pipe drains between frames and each frame
+/// goes out as its own websocket frame.
+static FRAME_DELAY_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Initialise FRAME_DELAY_US from `RUSHTLE_FRAME_DELAY_US`. Call once at
+/// process startup (before any `write_frame` activity). If the env var is
+/// unset or unparseable the delay stays at 0.
+pub fn init_frame_delay_from_env() {
+    if let Ok(s) = std::env::var("RUSHTLE_FRAME_DELAY_US") {
+        if let Ok(v) = s.parse::<u64>() {
+            FRAME_DELAY_US.store(v, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// Override the inter-frame delay at runtime. Used by the link probe to
+/// turn on chunking after detecting a truncating intermediary.
+pub fn set_frame_delay_us(us: u64) {
+    FRAME_DELAY_US.store(us, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Current delay in microseconds. Exposed for diagnostic logging.
+pub fn frame_delay_us() -> u64 {
+    FRAME_DELAY_US.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 fn frame_delay() -> std::time::Duration {
-    *FRAME_DELAY.get_or_init(|| {
-        std::env::var("RUSHTLE_FRAME_DELAY_US")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .map(std::time::Duration::from_micros)
-            .unwrap_or(std::time::Duration::ZERO)
-    })
+    std::time::Duration::from_micros(frame_delay_us())
 }
 
 /// Synchronization header sshuttle server writes before the first ssnet

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -101,6 +102,15 @@ func runSshuttle(args []string, pythonBin string) error {
 // runRushtle invokes the local rushtle binary, telling it to run
 // `rushtle server` inside the pod via kubectl exec. Pure rushtle, no
 // sshuttle, no python.
+//
+// `--chunk-bytes` mapping: in sshuttle path the workaround chunks
+// kubectl stdin at the syscall level (sshproxy.go's runKubectlChunked).
+// rushtle's frames are already capped at CHUNK=768 bytes (well under the
+// 1KB tailscale-fronted-apiserver truncation limit), but back-to-back
+// frames can still be coalesced into a >1KB websocket message if written
+// without delay. ssnet honors `RUSHTLE_FRAME_DELAY_US` to add an
+// inter-frame sleep — we forward `--chunk-delay-us` into it whenever the
+// user opts in via `--chunk-bytes > 0`. Same UX as sshuttle mode.
 func runRushtle(args []string) error {
 	bin, err := resolveRushtleBin()
 	if err != nil {
@@ -110,10 +120,28 @@ func runRushtle(args []string) error {
 	kctl := kubectlExecRushtleServer()
 
 	rushtleArgs := []string{"rushtle", "client", "--cmd", kctl}
+	// `--chunk-delay-us` doubles as the probe-fallback value in --rushtle
+	// mode: rushtle's startup probe sends a 2 KB PING — on timeout it sets
+	// FRAME_DELAY to this value and retries. So the user's existing flag
+	// drives both sshuttle's chunked stdin pump (via env) AND rushtle's
+	// auto-fallback delay (via CLI), keeping the UX consistent.
+	rushtleArgs = append(rushtleArgs, "--probe-fallback-us", strconv.Itoa(cfg.ChunkDelayUS))
 	rushtleArgs = append(rushtleArgs, args...)
 
+	env := os.Environ()
+	if cfg.ChunkBytes > 0 {
+		// Pre-set FRAME_DELAY so the very first frame already chunks —
+		// useful when the user knows their cluster needs it and wants to
+		// skip the probe's 3 s detection window. The probe will still
+		// run and confirm the delay value works.
+		env = append(env, fmt.Sprintf("RUSHTLE_FRAME_DELAY_US=%d", cfg.ChunkDelayUS))
+		fmt.Fprintf(os.Stderr,
+			"rushtle: pinning per-frame delay %dus (RUSHTLE_FRAME_DELAY_US) — explicit chunking requested\n",
+			cfg.ChunkDelayUS)
+	}
+
 	fmt.Fprintf(os.Stderr, "Starting rushtle via deploy/%s...\n  remote: %s\n", effectiveName(), kctl)
-	return syscall.Exec(bin, rushtleArgs, os.Environ())
+	return syscall.Exec(bin, rushtleArgs, env)
 }
 
 // kubectlExecRushtleServer returns the shell command the local rushtle client
