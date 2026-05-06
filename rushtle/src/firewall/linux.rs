@@ -121,6 +121,25 @@ fn iptables_cmd(bin: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// `iptables -t nat -N <chain>` but treats "Chain already exists" as a
+/// non-fatal condition. A prior crash / kill -9 can leave a stale chain;
+/// sshuttle handles this by proceeding straight to `-F` to flush it.
+/// Returns Ok(()) whether the chain was newly created or already existed.
+fn iptables_create_chain(bin: &str, chain: &str) -> Result<()> {
+    let res = iptables_cmd(bin, &["-t", "nat", "-N", chain]);
+    if res.is_ok() {
+        return Ok(());
+    }
+    // Probe for existence with `-L` (silent on success). If it exists, the
+    // earlier -N error was the harmless "Chain already exists"; otherwise
+    // surface the original failure.
+    if iptables_cmd(bin, &["-t", "nat", "-L", chain, "-n"]).is_ok() {
+        tracing::info!("{bin} chain {chain} already exists, reusing");
+        return Ok(());
+    }
+    res
+}
+
 pub fn install(
     chain: &str,
     tcp_port: u16,
@@ -133,7 +152,7 @@ pub fn install(
     let tcp_s = tcp_port.to_string();
     let dns_s = dns_port.to_string();
 
-    iptables_cmd("iptables", &["-t", "nat", "-N", chain])?;
+    iptables_create_chain("iptables", chain)?;
     iptables_cmd("iptables", &["-t", "nat", "-F", chain])?;
 
     // Mirror sshuttle/methods/nat.py rule order:
@@ -176,7 +195,7 @@ pub fn install(
     iptables_cmd("iptables", &["-t", "nat", "-A", "OUTPUT", "-j", chain])?;
 
     if !subnets_v6.is_empty() {
-        iptables_cmd("ip6tables", &["-t", "nat", "-N", chain])?;
+        iptables_create_chain("ip6tables", chain)?;
         iptables_cmd("ip6tables", &["-t", "nat", "-F", chain])?;
         iptables_cmd("ip6tables", &["-t", "nat", "-A", chain, "-d", "::1/128", "-j", "RETURN"])?;
         for cidr in subnets_v6 {

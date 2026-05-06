@@ -41,6 +41,15 @@ cluster.
 Use --rushtle to swap the python+sshuttle proxy for a static Rust binary.
 Same flow, no python bootstrap, fixes >1KB stdin truncation seen on some
 tailscale-fronted clusters.`,
+	// Validate mutually-exclusive flag combinations once, here, instead of
+	// in each subcommand's RunE — otherwise `create` silently picks one
+	// mode while `connect` rejects the same combo, which is confusing.
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if cfg.Rushtle && cfg.RushtleServer {
+			return fmt.Errorf("--rushtle and --rushtle-server are mutually exclusive")
+		}
+		return nil
+	},
 }
 
 func Execute() {
@@ -68,9 +77,12 @@ func init() {
 // use `<user>-rushtle-proxy` so the two can coexist in the same namespace
 // without colliding.
 //
-// User --name flag overrides this entirely (we honor explicit intent).
+// `--name` override is detected via cobra's Flags().Changed — comparing
+// `cfg.Name` against `defaultDeployName()` is unsafe because a user
+// passing `--name <user>-sshuttle-proxy` (the literal default value)
+// would be silently rewritten to `-rushtle-proxy` in rushtle modes.
 func effectiveName() string {
-	if cfg.Name != defaultDeployName() {
+	if rootCmd.PersistentFlags().Changed("name") {
 		return cfg.Name
 	}
 	if cfg.Rushtle || cfg.RushtleServer {

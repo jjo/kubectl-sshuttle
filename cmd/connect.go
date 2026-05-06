@@ -31,9 +31,8 @@ Three transport modes:
 	Args:         cobra.MinimumNArgs(1),
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if cfg.Rushtle && cfg.RushtleServer {
-			return fmt.Errorf("--rushtle and --rushtle-server are mutually exclusive")
-		}
+		// --rushtle / --rushtle-server mutex is validated in rootCmd's
+		// PersistentPreRunE so it applies uniformly to create/connect/etc.
 
 		name := effectiveName()
 		check := exec.Command("kubectl", kubectlArgs("rollout", "status", "deploy/"+name, "--timeout=5s")...)

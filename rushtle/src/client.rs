@@ -172,8 +172,24 @@ pub async fn run(args: ClientArgs) -> Result<()> {
 
     let cleanup_sig = cleanup.clone();
     tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("ctrl-c, cleaning up");
+        // Catch BOTH SIGINT and SIGTERM. ctrl_c() only handles SIGINT;
+        // a `kill <pid>` (default SIGTERM) or systemd-stop would otherwise
+        // skip cleanup and leave the iptables chain on the host.
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("install SIGTERM handler: {e}");
+                let _ = tokio::signal::ctrl_c().await;
+                tracing::info!("ctrl-c, cleaning up");
+                cleanup_sig();
+                std::process::exit(0);
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => tracing::info!("SIGINT, cleaning up"),
+            _ = term.recv() => tracing::info!("SIGTERM, cleaning up"),
+        }
         cleanup_sig();
         std::process::exit(0);
     });

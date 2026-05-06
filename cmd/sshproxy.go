@@ -101,6 +101,12 @@ func runKubectlChunked(kubectlPath string, args []string, chunkBytes int, delay 
 	}
 
 	// Pump os.Stdin → kubectl stdin in chunks.
+	//
+	// On write error (kubectl pipe broken / kubectl died) we cancel the
+	// context — that propagates through `exec.CommandContext` to terminate
+	// kubectl and unblock cmd.Wait() with an exit error sshuttle can see.
+	// Without this the goroutine returned silently and the parent could
+	// wedge if kubectl somehow stayed up after its stdin was rejected.
 	go func() {
 		defer stdin.Close()
 		buf := make([]byte, chunkBytes)
@@ -108,10 +114,10 @@ func runKubectlChunked(kubectlPath string, args []string, chunkBytes int, delay 
 			n, rerr := os.Stdin.Read(buf)
 			if n > 0 {
 				if _, werr := stdin.Write(buf[:n]); werr != nil {
+					fmt.Fprintf(os.Stderr, "ssh-proxy: kubectl stdin write: %v\n", werr)
+					cancel()
 					return
 				}
-				// Flush by sleeping briefly so kubectl drains the
-				// pipe between writes.
 				if delay > 0 {
 					time.Sleep(delay)
 				}
@@ -120,6 +126,8 @@ func runKubectlChunked(kubectlPath string, args []string, chunkBytes int, delay 
 				return
 			}
 			if rerr != nil {
+				fmt.Fprintf(os.Stderr, "ssh-proxy: stdin read: %v\n", rerr)
+				cancel()
 				return
 			}
 		}

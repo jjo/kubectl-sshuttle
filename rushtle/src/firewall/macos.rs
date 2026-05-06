@@ -43,11 +43,32 @@ const PF_OUT: u8 = 2;
 const DIOCNATLOOK: libc::c_ulong = 0xc0604417;
 
 #[repr(C)]
-#[derive(Default)]
+#[derive(Default, Copy, Clone)]
 struct PfAddr {
     pfa: [u8; 16],
 }
 
+// `union pf_state_xport { u_int16_t port; u_int16_t call_id; u_int32_t spi; }`
+// is 4 bytes wide on darwin. Port lives in the first 2 bytes (network order).
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+struct PfStateXport {
+    raw: [u8; 4],
+}
+
+impl PfStateXport {
+    fn set_port(&mut self, port: u16) {
+        self.raw[..2].copy_from_slice(&port.to_be_bytes());
+    }
+    fn port(&self) -> u16 {
+        u16::from_be_bytes([self.raw[0], self.raw[1]])
+    }
+}
+
+// Layout must match darwin `struct pfioc_natlook` exactly — sizeof = 96, which
+// the DIOCNATLOOK ioctl number (0xc0604417, with 0x60=96 in the size field)
+// confirms. Body is 4×16 + 4×4 + 4×1 = 84 bytes; tail pad of 12 brings it to
+// 96 to match the C struct's end-alignment / unused-fields region.
 #[repr(C)]
 #[derive(Default)]
 struct PfiocNatlook {
@@ -55,15 +76,18 @@ struct PfiocNatlook {
     daddr: PfAddr,
     rsaddr: PfAddr,
     rdaddr: PfAddr,
-    sxport: u16,
-    dxport: u16,
-    rsxport: u16,
-    rdxport: u16,
+    sxport: PfStateXport,
+    dxport: PfStateXport,
+    rsxport: PfStateXport,
+    rdxport: PfStateXport,
     af: u8,
     proto: u8,
     proto_variant: u8,
     direction: u8,
+    _pad: [u8; 12],
 }
+
+const _: () = assert!(std::mem::size_of::<PfiocNatlook>() == 96);
 
 /// State recorded by `install` so `remove` can undo cleanly.
 static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -195,20 +219,23 @@ pub fn original_dst(sock: &TcpStream, _is_v6: bool) -> Result<(String, u16)> {
             let lip: Ipv4Addr = *l.ip();
             nl.saddr.pfa[..4].copy_from_slice(&pip.octets());
             nl.daddr.pfa[..4].copy_from_slice(&lip.octets());
-            nl.sxport = p.port().to_be();
-            nl.dxport = l.port().to_be();
+            nl.sxport.set_port(p.port());
+            nl.dxport.set_port(l.port());
             nl.af = libc::AF_INET as u8;
         }
         (SocketAddr::V6(p), SocketAddr::V6(l)) => {
             nl.saddr.pfa.copy_from_slice(&p.ip().octets());
             nl.daddr.pfa.copy_from_slice(&l.ip().octets());
-            nl.sxport = p.port().to_be();
-            nl.dxport = l.port().to_be();
+            nl.sxport.set_port(p.port());
+            nl.dxport.set_port(l.port());
             nl.af = libc::AF_INET6 as u8;
         }
         _ => bail!("peer/local family mismatch"),
     }
     nl.proto = libc::IPPROTO_TCP as u8;
+    // sshuttle/methods/pf.py probes PF_OUT first then falls back to PF_IN.
+    // Mirror that order to match its semantics on hosts where rules are
+    // installed at OUT instead of IN.
     nl.direction = PF_OUT;
 
     let pf = OpenOptions::new()
@@ -220,7 +247,6 @@ pub fn original_dst(sock: &TcpStream, _is_v6: bool) -> Result<(String, u16)> {
         libc::ioctl(pf.as_raw_fd(), DIOCNATLOOK, &mut nl as *mut _)
     };
     if rc != 0 {
-        // If OUT direction failed, try IN — sshuttle does both.
         nl.direction = PF_IN;
         let rc2 = unsafe { libc::ioctl(pf.as_raw_fd(), DIOCNATLOOK, &mut nl as *mut _) };
         if rc2 != 0 {
@@ -228,7 +254,7 @@ pub fn original_dst(sock: &TcpStream, _is_v6: bool) -> Result<(String, u16)> {
         }
     }
 
-    let port = u16::from_be(nl.rdxport);
+    let port = nl.rdxport.port();
     let ip_str = if nl.af == libc::AF_INET as u8 {
         let mut o = [0u8; 4];
         o.copy_from_slice(&nl.rdaddr.pfa[..4]);

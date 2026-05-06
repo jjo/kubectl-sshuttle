@@ -90,7 +90,10 @@ KREW_ARCH  := $(shell uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
 
 # Path to the snapshot tarball for the host OS/ARCH. Goreleaser names them
 # kubectl-sshuttle_<version>_<os>_<arch>.tar.gz; we pick whichever exists.
-KREW_TARBALL := $(firstword $(wildcard dist/kubectl-sshuttle_*_$(KREW_OS)_$(KREW_ARCH).tar.gz))
+# Use `=` (recursive) not `:=` so the wildcard is evaluated each time the
+# variable is referenced — at parse time `dist/` doesn't exist yet
+# (release-snapshot creates it), so `:=` would always be empty.
+KREW_TARBALL = $(firstword $(wildcard dist/kubectl-sshuttle_*_$(KREW_OS)_$(KREW_ARCH).tar.gz))
 
 # Install the just-built snapshot tarball via krew, the same way users will
 # get it from the krew-index. Use this to dry-run the full plugin install
