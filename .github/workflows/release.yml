@@ -7,8 +7,77 @@ on:
 permissions:
   contents: write
 
+# v0.2.3 shipped placeholder rushtle binaries for every platform except
+# linux/amd64 because scripts/build-rushtle-prebuilt.sh runs on a single
+# ubuntu-latest runner and writes shell-stub placeholders for arches it
+# can't build natively. We split the prebuild into per-platform jobs that
+# upload artifacts; the goreleaser job downloads them into prebuilt/
+# before invoking goreleaser.
+
 jobs:
+  build-rushtle-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build rushtle for linux/{amd64,arm64} via buildx
+        env:
+          # Drives scripts/build-rushtle-prebuilt.sh::build_linux_qemu_arm64
+          # in addition to the always-on linux/amd64 build.
+          BUILD_ALL_LINUX: "1"
+          GIT_REV: ${{ github.sha }}
+        run: |
+          set -euxo pipefail
+          docker buildx create --use --name rushtle-builder || true
+          bash scripts/build-rushtle-prebuilt.sh
+          file prebuilt/rushtle_linux_amd64/rushtle
+          file prebuilt/rushtle_linux_arm64/rushtle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rushtle_linux_amd64
+          path: prebuilt/rushtle_linux_amd64/rushtle
+          retention-days: 1
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rushtle_linux_arm64
+          path: prebuilt/rushtle_linux_arm64/rushtle
+          retention-days: 1
+          if-no-files-found: error
+
+  build-rushtle-darwin:
+    # macos-latest is Apple Silicon (arm64). The script's darwin branch
+    # uses `rustup target add` for both x86_64-apple-darwin and
+    # aarch64-apple-darwin and cargo-builds each natively (with Rosetta
+    # available for x86_64 binaries when needed at run-time).
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+      - name: Build rushtle for darwin/{amd64,arm64}
+        env:
+          GIT_REV: ${{ github.sha }}
+        run: |
+          set -euxo pipefail
+          bash scripts/build-rushtle-prebuilt.sh
+          file prebuilt/rushtle_darwin_amd64/rushtle
+          file prebuilt/rushtle_darwin_arm64/rushtle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rushtle_darwin_amd64
+          path: prebuilt/rushtle_darwin_amd64/rushtle
+          retention-days: 1
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rushtle_darwin_arm64
+          path: prebuilt/rushtle_darwin_arm64/rushtle
+          retention-days: 1
+          if-no-files-found: error
+
   goreleaser:
+    needs: [build-rushtle-linux, build-rushtle-darwin]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,10 +86,24 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Download per-platform rushtle binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: prebuilt
+          # Each artifact is named `rushtle_<os>_<arch>` and contains a
+          # single file `rushtle`. download-artifact extracts each into
+          # prebuilt/rushtle_<os>_<arch>/rushtle — exactly the layout
+          # the .goreleaser.yml `archives.files.src` template expects.
+          pattern: rushtle_*
+      - run: chmod +x prebuilt/*/rushtle && ls -la prebuilt/*/
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: latest
-          args: release --clean
+          # --skip=before bypasses scripts/build-rushtle-prebuilt.sh —
+          # the prebuild matrix above already populated prebuilt/. Re-running
+          # the script here would overwrite the matrix-built binaries with
+          # placeholders for arches this runner can't build natively.
+          args: release --clean --skip=before
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: rajatjindal/krew-release-bot@v0.0.50

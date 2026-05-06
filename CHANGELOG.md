@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.2.4 — 2026-05-06
+
+Re-release of v0.2.3. Fixes the per-platform rushtle binary in the
+release tarballs: v0.2.3 shipped real `rushtle` only for linux/amd64;
+linux/arm64 + darwin/{amd64,arm64} got placeholder shell stubs.
+
+### Fixed
+
+- **`.github/workflows/release.yml`**: split into per-platform builder
+  jobs that upload artifacts, plus a goreleaser job that downloads
+  them. linux/{amd64,arm64} builds on `ubuntu-latest` via buildx
+  (qemu for arm64). darwin/{amd64,arm64} builds on `macos-latest` via
+  cargo with both `*-apple-darwin` rustup targets installed.
+  goreleaser now runs with `--skip=before` so the local prebuild
+  script doesn't overwrite the matrix-built binaries with placeholders.
+
 ## v0.2.3 — 2026-05-06
 
 Re-release of v0.2.2 with the krew publish path fixed. The v0.2.2
