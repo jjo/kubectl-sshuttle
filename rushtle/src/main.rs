@@ -6,8 +6,15 @@ mod firewall;
 mod server;
 mod ssnet;
 
+/// Version string baked into clap's `--version` output: crate semver +
+/// short git sha (filled in by build.rs). Examples:
+///
+///   rushtle 0.2.0+ace3751
+///   rushtle 0.2.0+unknown   (built outside a git checkout)
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("RUSHTLE_GIT_REV"));
+
 #[derive(Parser, Debug)]
-#[command(version, about = "sshuttle-compatible TCP tunnel (rushtle)", long_about = None)]
+#[command(version = VERSION, about = "sshuttle-compatible TCP tunnel (rushtle)", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,

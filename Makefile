@@ -1,6 +1,14 @@
 BINARY := kubectl-sshuttle
 GOBIN  ?= $(shell go env GOPATH)/bin
 
+# Version stamping. `VERSION` prefers the most recent annotated tag (with a
+# `-dirty` suffix when the worktree has uncommitted changes); `GIT_REV` is
+# the short HEAD sha. Both fall back to `unknown` outside a git checkout
+# (e.g. `go install ...@latest`, source tarball builds).
+VERSION := $(shell git describe --tags --dirty --always 2>/dev/null || echo unknown)
+GIT_REV := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+GO_LDFLAGS := -X github.com/jjo/kubectl-sshuttle/cmd.version=$(VERSION)+$(GIT_REV)
+
 # rushtle (Rust) — optional component used when --rushtle is passed.
 RUSHTLE_DIR     := rushtle
 RUSHTLE_IMAGE   ?= xjjo/rushtle
@@ -18,7 +26,7 @@ SSHUTTLE_REF    := $(SSHUTTLE_IMAGE):$(SSHUTTLE_TAG)
 .PHONY: build test install clean rushtle rushtle-image rushtle-image-multiarch rushtle-push rushtle-test rushtle-kind-load rushtle-prebuilt release-snapshot krew-install-local krew-uninstall-local sshuttle-image sshuttle-push images-push
 
 build:
-	go build -o $(BINARY) .
+	go build -ldflags "$(GO_LDFLAGS)" -o $(BINARY) .
 
 test:
 	go test ./... -v

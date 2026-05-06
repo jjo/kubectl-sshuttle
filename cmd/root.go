@@ -26,9 +26,22 @@ type Config struct {
 
 var cfg Config
 
+// version is overridden at build time via:
+//
+//	-ldflags "-X github.com/jjo/kubectl-sshuttle/cmd.version=<git-describe>"
+//
+// See Makefile `VERSION` / `GIT_REV` for how this is populated. `dev` is the
+// dev-build fallback (`go build` / `go install` with no ldflags).
+var version = "dev"
+
+// Version returns the embedded version string. Exposed so other packages
+// (e.g. cmd/connect.go's diagnostic banner) can reference it.
+func Version() string { return version }
+
 var rootCmd = &cobra.Command{
-	Use:   "kubectl-sshuttle",
-	Short: "Tunnel traffic through a Kubernetes cluster using sshuttle",
+	Use:     "kubectl-sshuttle",
+	Version: version,
+	Short:   "Tunnel traffic through a Kubernetes cluster using sshuttle",
 	Long: `kubectl-sshuttle manages a proxy pod in a Kubernetes cluster and uses
 sshuttle (or rushtle, the Rust port) to tunnel traffic through it. This
 lets you reach IPs and subnets that are only accessible from inside the
