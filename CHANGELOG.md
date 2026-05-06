@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.2.5 — 2026-05-06
+
+Re-release of v0.2.4. Fixes the macOS half of the new matrix release
+workflow, which failed because `scripts/build-rushtle-prebuilt.sh`
+unconditionally invoked `docker buildx` to build the linux/amd64
+variant — and macos-latest runners have no Docker preinstalled.
+
+### Fixed
+
+- **`scripts/build-rushtle-prebuilt.sh`**: branched the linux build
+  block on `uname -s`. On a darwin host the linux variants are written
+  as placeholders (the linux builder job in the workflow uploads the
+  real linux/amd64 + linux/arm64 binaries separately). The darwin
+  builder job now runs cleanly without needing Docker.
+
 ## v0.2.4 — 2026-05-06
 
 Re-release of v0.2.3. Fixes the per-platform rushtle binary in the

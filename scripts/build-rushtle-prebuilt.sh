@@ -72,20 +72,28 @@ EOF
     chmod 0755 "$out/rushtle"
 }
 
-# Always build the host platform (linux/amd64). Matches local dev — fast,
-# usable, single-arch output good enough for `make krew-install-local`.
-build_linux_native_amd64
+HOST_OS="$(uname -s)"
 
-# Optional local arm64 (slow QEMU build). CI flips this on via env.
-if [ "${BUILD_ALL_LINUX:-0}" = "1" ]; then
-    build_linux_qemu_arm64
+# Linux builds: only on a linux host (need Docker buildx). On darwin /
+# elsewhere we write placeholders so the goreleaser archive `files:` block
+# resolves; CI's per-platform builder jobs upload the real binary as an
+# artifact and the goreleaser job downloads it over the placeholder.
+if [ "${HOST_OS}" = "Linux" ]; then
+    build_linux_native_amd64
+    if [ "${BUILD_ALL_LINUX:-0}" = "1" ]; then
+        build_linux_qemu_arm64
+    else
+        echo "==> linux/arm64: writing placeholder (set BUILD_ALL_LINUX=1 to build locally; CI fills it in)"
+        placeholder linux_arm64
+    fi
 else
-    echo "==> linux/arm64: writing placeholder (set BUILD_ALL_LINUX=1 to build locally; CI fills it in)"
+    echo "==> linux: writing placeholders (host is ${HOST_OS}, no Docker)"
+    placeholder linux_amd64
     placeholder linux_arm64
 fi
 
 # Darwin: only when host is macOS. CI uses a darwin runner.
-if [ "$(uname -s)" = "Darwin" ]; then
+if [ "${HOST_OS}" = "Darwin" ]; then
     for arch in amd64 arm64; do
         triple="darwin_${arch}"
         case "$arch" in
@@ -102,7 +110,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
             chmod 0755 "$out/rushtle" )
     done
 else
-    echo "==> darwin: writing placeholders (host is $(uname -s); CI fills these in)"
+    echo "==> darwin: writing placeholders (host is ${HOST_OS}; CI fills these in)"
     placeholder darwin_amd64
     placeholder darwin_arm64
 fi
