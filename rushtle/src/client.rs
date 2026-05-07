@@ -72,35 +72,14 @@ pub async fn run(args: ClientArgs) -> Result<()> {
         None
     };
 
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg(&args.remote_cmd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .with_context(|| format!("spawn remote: {}", args.remote_cmd))?;
-
-    let mut remote_stdin = child.stdin.take().ok_or_else(|| anyhow!("no remote stdin"))?;
-    let remote_stdout = child.stdout.take().ok_or_else(|| anyhow!("no remote stdout"))?;
-    let mut remote_stdout = tokio::io::BufReader::new(remote_stdout);
-
-    if let Err(e) = ssnet::read_sync_header(&mut remote_stdout).await {
-        return Err(anyhow!("waiting for server sync header: {e}"));
-    }
-    tracing::info!("got server sync header, entering ssnet mode");
-
-    // Probe link health before opening real connections. On truncating
-    // middleware (some tailscale-fronted apiservers) the probe times out;
-    // we then turn on chunking and retry. See `ensure_link` for the full
-    // logic. Probe is inline because it consumes the same stdin/stdout
-    // streams that the writer / demux tasks will own afterwards.
-    ensure_link(
-        &mut remote_stdin,
-        &mut remote_stdout,
-        args.probe_fallback_us,
-    )
-    .await?;
+    // Spawn kubectl-exec child + probe link health, with a respawn fallback
+    // for clusters where the unchunked probe burst kills the entire
+    // websocket session (some tailscale-fronted apiservers do this — the
+    // pipe goes dead, not just truncates). On dead-pipe failure
+    // `link_setup` kills the old child, sets `RUSHTLE_FRAME_DELAY_US`, and
+    // respawns a fresh kubectl-exec session before probing again.
+    let (_child, mut remote_stdin, mut remote_stdout) =
+        link_setup(&args.remote_cmd, args.probe_fallback_us).await?;
 
     let (out_tx, mut out_rx) = mpsc::channel::<Frame>(1024);
     let _writer_task = tokio::spawn(async move {
@@ -366,6 +345,106 @@ async fn handle_conn(
     let _ = tokio::join!(a, b);
     channels.lock().await.remove(&ch);
     tracing::debug!("ch={ch} closed");
+}
+
+// --- child spawn + link setup ----------------------------------------------
+
+/// Tokio child handle + the two pipe ends we hand to the writer/demux tasks.
+type RemoteIo = (
+    tokio::process::Child,
+    tokio::process::ChildStdin,
+    tokio::io::BufReader<tokio::process::ChildStdout>,
+);
+
+/// Spawn `sh -c <remote_cmd>` and grab its stdio pipes. Stderr inherits so
+/// kubectl-exec error messages reach the user.
+async fn spawn_child(remote_cmd: &str) -> Result<RemoteIo> {
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(remote_cmd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .with_context(|| format!("spawn remote: {remote_cmd}"))?;
+    let stdin = child.stdin.take().ok_or_else(|| anyhow!("no remote stdin"))?;
+    let stdout = child.stdout.take().ok_or_else(|| anyhow!("no remote stdout"))?;
+    Ok((child, stdin, tokio::io::BufReader::new(stdout)))
+}
+
+/// Heuristic: did this error indicate the remote pipe is dead? Inner-retry
+/// inside `ensure_link` cannot recover from a closed pipe, so we surface
+/// dead-pipe failures specifically and respawn the kubectl-exec session.
+fn is_dead_pipe_err(e: &anyhow::Error) -> bool {
+    let s = format!("{e:#}");
+    s.contains("Broken pipe")
+        || s.contains("os error 32")
+        || s.contains("EOF on remote stdout")
+        || s.contains("UnexpectedEof")
+        || s.contains("unexpected end of file")
+}
+
+/// Establish the rushtle <-> kubectl-exec link with auto-recovery for
+/// burst-kill apiserver middleware.
+///
+/// Strategy:
+///   1. Spawn kubectl-exec, read sync header, run probe with the current
+///      `FRAME_DELAY_US` (zero by default; honors any pre-set env).
+///   2. On success: return the live io handles.
+///   3. On dead-pipe failure (websocket killed during probe burst): kill
+///      the old child, set `FRAME_DELAY_US = fallback_us`, respawn a fresh
+///      kubectl-exec, and probe again. The second probe runs with chunking
+///      from frame 1 — survives clusters where back-to-back unchunked
+///      writes tear down the entire session.
+///   4. On any other failure (frames lost but pipe alive, payload mismatch,
+///      etc.): the inner retry inside `ensure_link` already engaged
+///      chunking on the same pipe; we propagate its result.
+async fn link_setup(remote_cmd: &str, fallback_us: u64) -> Result<RemoteIo> {
+    let (mut child, mut stdin, mut stdout) = spawn_child(remote_cmd).await?;
+
+    if let Err(e) = ssnet::read_sync_header(&mut stdout).await {
+        return Err(anyhow!("waiting for server sync header: {e}"));
+    }
+    tracing::info!("got server sync header, entering ssnet mode");
+
+    match ensure_link(&mut stdin, &mut stdout, fallback_us).await {
+        Ok(()) => Ok((child, stdin, stdout)),
+        Err(e) if is_dead_pipe_err(&e) && fallback_us > 0 => {
+            tracing::warn!(
+                "kubectl-exec died during probe ({:#}); respawning with FRAME_DELAY={fallback_us}us pre-set",
+                e
+            );
+            // Kill old child and drop pipes so the host-side fd is released.
+            let _ = child.kill().await;
+            drop(stdin);
+            drop(stdout);
+
+            // Pre-set the delay BEFORE we start writing into the new pipe —
+            // this is the whole point of the respawn path.
+            ssnet::set_frame_delay_us(fallback_us);
+
+            let (child2, mut stdin2, mut stdout2) = spawn_child(remote_cmd).await?;
+            if let Err(e) = ssnet::read_sync_header(&mut stdout2).await {
+                return Err(anyhow!("waiting for server sync header (respawn): {e}"));
+            }
+            tracing::info!("got server sync header on respawn, re-running probe");
+
+            // On the respawn we don't want ensure_link's inner retry
+            // doubling up, but the worst case is one extra probe round —
+            // if that also fails the error message is clear enough.
+            ensure_link(&mut stdin2, &mut stdout2, fallback_us)
+                .await
+                .with_context(|| {
+                    format!(
+                        "probe still failing after respawn with FRAME_DELAY={fallback_us}us — \
+                         apiserver layer drops frames even with chunking. \
+                         Try a larger --probe-fallback-us, or fall back to --rushtle-server."
+                    )
+                })?;
+            Ok((child2, stdin2, stdout2))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // --- link health probe -----------------------------------------------------

@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.2.6 — 2026-05-07
+
+Fixes a hard failure mode in `--rushtle` mode against burst-kill
+apiserver middleware (observed on tailscale-fronted clusters): the
+unchunked link-probe burst tore down the entire kubectl-exec
+websocket session (`close 1006 abnormal closure`), and `ensure_link`'s
+in-pipe retry then hit `Broken pipe` because the pipe was already
+dead. Workaround was to manually pre-set `RUSHTLE_FRAME_DELAY_US=2000`
+or pass `--chunk-bytes 768`.
+
+### Fixed
+
+- **`rushtle/src/client.rs`**: extracted `link_setup` which wraps the
+  child spawn + sync-header read + `ensure_link` probe. On dead-pipe
+  failure (heuristic match against `Broken pipe`, `os error 32`, EOF,
+  `UnexpectedEof`) it kills the old child, sets `FRAME_DELAY_US =
+  fallback_us`, respawns a fresh kubectl-exec session, and probes
+  again with chunking applied from the first frame. Healthy clusters
+  pay zero cost — the fast-path probe at zero delay is unchanged.
+  Burst-kill clusters now auto-recover with a one-time ~3 s startup
+  penalty instead of bailing.
+
 ## v0.2.5 — 2026-05-06
 
 Re-release of v0.2.4. Fixes the macOS half of the new matrix release
