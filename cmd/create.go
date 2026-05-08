@@ -12,12 +12,18 @@ import (
 
 var createCmd = &cobra.Command{
 	Use:   "create",
-	Short: "Create the sshuttle proxy deployment and wait for readiness",
+	Short: "Create the proxy deployment and wait for readiness",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		image := cfg.Image
+		useRushtleImg := cfg.Rushtle || cfg.RushtleServer
+		if useRushtleImg {
+			image = cfg.RushtleImage
+		}
 		yaml, err := proxy.DeploymentYAML(proxy.DeploymentConfig{
-			Name:      cfg.Name,
+			Name:      effectiveName(),
 			Namespace: cfg.Namespace,
-			Image:     cfg.Image,
+			Image:     image,
+			Rushtle:   useRushtleImg,
 		})
 		if err != nil {
 			return fmt.Errorf("generating deployment: %w", err)
@@ -32,9 +38,12 @@ var createCmd = &cobra.Command{
 			return fmt.Errorf("kubectl apply: %w", err)
 		}
 
-		// Wait for rollout
-		fmt.Fprintf(os.Stderr, "Waiting for proxy pod readiness (installing sshuttle + deps)...\n")
-		return runKubectl("rollout", "status", "deploy/"+cfg.Name, "--timeout="+cfg.Timeout)
+		if useRushtleImg {
+			fmt.Fprintf(os.Stderr, "Waiting for rushtle proxy pod readiness...\n")
+		} else {
+			fmt.Fprintf(os.Stderr, "Waiting for proxy pod readiness (installing sshuttle + deps)...\n")
+		}
+		return runKubectl("rollout", "status", "deploy/"+effectiveName(), "--timeout="+cfg.Timeout)
 	},
 }
 

@@ -1,0 +1,27 @@
+[package]
+name = "rushtle"
+version = "0.2.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "sshuttle-compatible TCP tunnel in Rust"
+repository = "https://github.com/jjo/kubectl-sshuttle"
+
+[[bin]]
+name = "rushtle"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "io-std", "macros", "process", "signal", "sync", "time"] }
+clap = { version = "4", features = ["derive"] }
+bytes = "1"
+libc = "0.2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+opt-level = "z"
+panic = "abort"
